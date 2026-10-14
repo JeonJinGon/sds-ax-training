@@ -161,7 +161,7 @@ def build_agent(llm=None):
     # TODO: 구현하세요.
 
     from langchain.agents import create_agent
-    
+    from langchain.agents.middleware import after_model, before_model
 
     # 모델에게 줄 조사 규칙. 연쇄(배포 시각 → since)를 유도하는 문장이 핵심입니다.
     system_rule = (
@@ -173,8 +173,44 @@ def build_agent(llm=None):
         "같은 도구를 같은 인자로 다시 부르지 마세요."
     )
 
-    
-    return create_agent(model=llm, tools=TOOLS, system_prompt=system_rule)
+    def _tool_count(messages):
+        """지금까지 실제로 실행된 도구 횟수 = ToolMessage 개수."""
+        return sum(1 for m in messages if getattr(m, "type", "") == "tool")
+
+    # ── 훅 1: 모델 응답 직후 (도구 실행 전) ─────────────────────────
+    # 모델이 요청한 도구 호출이 예산을 넘기거나 중복이면 실행하지 않고 종료합니다.
+    @after_model(can_jump_to=["end"])
+    def block_bad_calls(state, runtime):
+        messages = state["messages"]
+        pending = getattr(messages[-1], "tool_calls", None) or []
+        if not pending:
+            return None  # 도구 호출이 없으면 create_agent가 알아서 종료합니다.
+
+        made = _tool_count(messages)
+        # 탈출 조건: 이번 호출까지 실행하면 예산 초과 → 실행 전에 차단
+        if made + len(pending) > MAX_TOOL_CALLS:
+            return {"jump_to": "end"}
+        # 탈출 조건: 같은 도구·같은 인자 재호출 → 실행 전에 차단
+        stop, reason = should_stop(messages, made)
+        if stop and reason == "중복 호출":
+            return {"jump_to": "end"}
+        return None  # 통과 → tools 노드로 진행
+
+    # ── 훅 2: 모델 호출 직전 (도구 실행 후, 다음 판단 전) ────────────
+    # 예산을 다 썼거나 세 도구를 모두 써서 근거가 충분하면 더 묻지 않고 종료합니다.
+    @before_model(can_jump_to=["end"])
+    def stop_when_enough(state, runtime):
+        messages = state["messages"]
+        stop, _ = should_stop(messages, _tool_count(messages))
+        return {"jump_to": "end"} if stop else None
+
+    # create_agent가 model ↔ tools 순환을 만들고, 미들웨어가 그 사이에서 탈출 조건을 검사합니다.
+    return create_agent(
+        model=llm,
+        tools=TOOLS,
+        system_prompt=system_rule,
+        middleware=[stop_when_enough, block_bad_calls],
+    )
 
     class _GuardedModel:
         """실제 모델을 감싸, 응답이 나올 때마다 _guard 검사를 끼워 넣는 래퍼입니다."""
