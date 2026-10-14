@@ -86,5 +86,36 @@
     "type": "no_answer",
     "expected_source": null,
     "expected_answer": "제공된 문서에서 답을 찾을 수 없습니다."
+  },
+    {
+    "id": "d3-01",
+    "question": "5xx 에러가 무엇을 의미하나요?",
+    "type": "no_tool",
+    "expected_tools": []
+  },
+  {
+    "id": "d3-02",
+    "question": "payment-api의 현재 오류율과 p99 지연은 얼마인가요?",
+    "type": "single_tool",
+    "expected_tools": ["get_metrics"]
+  },
+  {
+    "id": "d3-03",
+    "question": "auth-service의 마지막 배포 버전은 무엇인가요?",
+    "type": "single_tool",
+    "expected_tools": ["get_deploy_history"]
+  },
+  {
+    "id": "d3-04",
+    "question": "payment-api에서 5xx가 급증했습니다. 최근 배포 직후 로그에 어떤 에러가 찍혔나요?",
+    "type": "multi_tool",
+    "expected_tools": ["get_deploy_history", "get_logs"]
+  },
+  {
+    "id": "d3-05",
+    "question": "payment-api 장애 원인을 배포·로그·지표를 모두 보고 정리해 주세요.",
+    "type": "multi_tool",
+    "expected_tools": ["get_deploy_history", "get_logs", "get_metrics"]
   }
+
 ]
