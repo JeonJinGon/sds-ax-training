@@ -157,6 +157,7 @@ def build_agent(llm=None):
     create_react_agent를 써도 되고 StateGraph로 직접 만들어도 됩니다.
     심화 파트를 구현했다면 should_stop 판정을 그래프에 연결하세요.
     """
+    
     llm = llm or _default_llm()
     # TODO: 구현하세요.
 
