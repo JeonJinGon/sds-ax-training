@@ -116,6 +116,27 @@
     "question": "payment-api 장애 원인을 배포·로그·지표를 모두 보고 정리해 주세요.",
     "type": "multi_tool",
     "expected_tools": ["get_deploy_history", "get_logs", "get_metrics"]
+  },
+  {
+    "id": "d4-01",
+    "question": "SRV-001 자산 상태를 조회하는데 백엔드가 계속 타임아웃이 납니다. 상태를 알려 주세요.",
+    "type": "tool_recovery",
+    "expected_tools": ["get_asset_status", "get_asset_status_backup"],
+    "expected_behavior": "재시도 후 대체 경로로 넘어가고, 캐시 값임을 밝힌다"
+  },
+  {
+    "id": "d4-02",
+    "question": "SRV-002 상태 조회 응답에 status 필드가 빠져 있다는 오류가 납니다. 지금 상태가 어떤가요?",
+    "type": "tool_recovery",
+    "expected_tools": ["get_asset_status", "get_asset_status_backup"],
+    "expected_behavior": "스키마 오류는 재시도하지 않고 즉시 대체 경로를 쓴다"
+  },
+  {
+    "id": "d4-03",
+    "question": "'디스크 풀' 증상의 런북을 찾아 주세요.",
+    "type": "tool_recovery",
+    "expected_tools": ["search_runbook"],
+    "expected_behavior": "등록되지 않은 키워드 안내를 받고 쓸 수 있는 값(5xx, oom, cert)을 제시한다"
   }
 
 ]
