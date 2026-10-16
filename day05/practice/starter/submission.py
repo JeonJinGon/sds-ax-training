@@ -254,34 +254,82 @@ RISK_LEVELS: dict[str, str] = {
     "get_asset_status": "read",
     "get_asset_status_backup": "read",
     "search_runbook": "read",
+    "get_service_owner": "read",        # Day 4 도구 — 담당팀·온콜 조회
+    "query_recent_incidents": "read",   # Day 4 도구 — 최근 인시던트 조회
     # write — 상태 변경(재시작·스케일 조정). 되돌릴 수는 있으나 사람 승인 필요.
     "restart_service": "write",
     "scale_service": "write",
     "rollback_deploy": "write",
-    # destructive — 되돌릴 수 없음(삭제·자격증명 교체). 승인 + 이중 확인.
+    # destructive — 되돌릴 수 없음(삭제·자격증명 교체·프로세스 강제 종료·권한 상승·임의 명령 실행). 승인 + 이중 확인.
     "delete_asset": "destructive",
     "rotate_credentials": "destructive",
     "drop_database": "destructive",
+    "kill_process": "destructive",
+    "terminate_instance": "destructive",
+    "grant_admin_role": "destructive",
+    "escalate_privilege": "destructive",
+    "run_command": "destructive",
+    "execute_shell": "destructive",
 }
 
+# 위험도 상향 규칙 — RISK_LEVELS 등록만으로는 막을 수 없는 두 구멍을 메웁니다.
+#   (1) 미등록 도구라도 이름이 파괴·권한 상승을 뜻하면 destructive로 봅니다.
+#       예: kill_pod, revoke_token, grant_sudo, chmod_file …
+#       → "모르는 것은 막는다"(승인 필요)는 그대로 지키고, 이중 확인까지 붙입니다.
+#   (2) 등록된 도구라도 인자(args)에 위험 명령이 실려 오면 destructive로 올립니다.
+#       예: restart_service(cmd="kill -9 1"), get_logs(path="/etc/sudoers") …
+#       → 이름만 보고 판정하면 인자로 우회됩니다. 상향만 하고 하향은 하지 않습니다.
+_DANGEROUS_TOOL_NAME = re.compile(
+    r"(delete|drop|remove|destroy|purge|wipe|truncate|format|rotate|revoke|reset"
+    r"|kill|terminate|shutdown|reboot|halt|stop_all"
+    r"|grant|escalat|elevat|privilege|sudo|root|admin|chmod|chown|impersonat"
+    r"|exec|shell|command|run_cmd|eval)",
+    re.IGNORECASE,
+)
+_DANGEROUS_ARG = re.compile(
+    # 프로세스 강제 종료·시스템 중단
+    r"(\bkill\b|pkill|killall|taskkill|\bshutdown\b|\breboot\b|\bhalt\b|systemctl\s+(stop|kill|disable)"
+    # 권한 상승
+    r"|\bsudo\b|\bsu\b(\s+-|\s+root|$)|\bdoas\b|runas|setuid|chmod\s+(\+s|[0-7]*[4-7][0-7]{2}\b|777)"
+    r"|chown\s+root|usermod\s+-a?g|visudo|/etc/(sudoers|passwd|shadow)|--privileged"
+    r"|grant\s+(all|admin|superuser)|alter\s+user|role\s*[:=]\s*[\"']?(admin|root|superuser)"
+    r"|is_?admin\s*[:=]\s*(true|1)"
+    # 되돌릴 수 없는 삭제
+    r"|rm\s+-[a-z]*r[a-z]*f|rm\s+-[a-z]*f[a-z]*r|drop\s+(table|database)|truncate\s+table|mkfs|dd\s+if=)",
+    re.IGNORECASE,
+)
+
+
+def _args_text(args: Any) -> str:
+    """args(dict·list·문자열 중첩 가능)를 검사용 문자열 하나로 펼칩니다. 키 이름도 포함합니다."""
+    if args is None:
+        return ""
+    if isinstance(args, dict):
+        return " ".join(f"{k}={_args_text(v)}" for k, v in args.items())
+    if isinstance(args, (list, tuple, set)):
+        return " ".join(_args_text(v) for v in args)
+    return str(args)
 
 
 def needs_approval(tool_name: str, args: dict) -> tuple[bool, str]:
-    """이 도구 호출에 사람 승인이 필요한지 판정합니다. LLM을 호출하지 않습니다.
+    # 같은 (도구, 인자)는 항상 같은 판정을 냅니다(결정성). LLM 없이 규칙만 씁니다.
+    name = str(tool_name or "").strip()
+    level = RISK_LEVELS.get(name) or RISK_LEVELS.get(name.lower())
 
-    규칙:
-      - read         -> 승인 불필요. (전부 막으면 자동화의 의미가 없습니다)
-      - write        -> 승인 필요
-      - destructive  -> 승인 필요 + 이중 확인 표시
-      - 목록에 없는 도구 -> 승인 필요 (모르는 것은 막는다)
+    # (1) 미등록인데 이름이 파괴·권한 상승을 뜻하면 destructive
+    if level is None and _DANGEROUS_TOOL_NAME.search(name):
+        return True, (
+            f"destructive: 미등록 위험 도구 '{name}'(파괴·종료·권한 상승 추정) "
+            "— 승인 + 이중 확인(double confirm) 필요"
+        )
 
-    Returns:
-        (승인이 필요한가, 사유 또는 확인 수준)
-        destructive인 경우 사유 문자열에 "이중" 또는 "double" 을 포함하세요.
-    """
-    # TODO: 구현하세요.
-        # args는 판정에 쓰지 않습니다. 같은 도구는 인자와 무관하게 항상 같은 정책을 따릅니다(결정성).
-    level = RISK_LEVELS.get(str(tool_name).strip())
+    # (2) 인자에 위험 명령(kill·sudo·rm -rf 등)이 있으면 등급과 무관하게 destructive로 상향
+    hit = _DANGEROUS_ARG.search(_args_text(args))
+    if hit:
+        return True, (
+            f"destructive: 인자에 위험 명령 '{hit.group(0).strip()}' 포함 "
+            "— 승인 + 이중 확인(double confirm) 필요"
+        )
 
     if level == "read":
         return False, "read: 조회 도구 — 승인 없이 자동 실행"
