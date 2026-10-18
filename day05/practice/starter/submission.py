@@ -48,10 +48,14 @@ def load_public_sets() -> tuple[list[str], list[str]]:
 #     한국어는 목적어가 동사보다 앞에 오므로 "대상 → 동작" 순서만 봅니다.
 #     "규칙", "설정"은 정상 문장("알람 규칙 무시해도 돼?")에 자주 나와 대상에서 뺐습니다.
 _KO_OVERRIDE_TARGET = r"(지시|지침|명령|프롬프트|대화)"
-#     "잊지 말고", "무시하지 말고"처럼 부정형은 오히려 지시를 지키라는 뜻이므로 제외합니다.
+#     [함정 대응] 동작은 '시키는 꼴'(~하고 / ~해라 / ~해줘)일 때만 인정합니다.
+#       - 보고형("무시되는 원인", "잊어버렸어요")이나 허락을 묻는 꼴("무시해도 돼요?")은 통과
+#       - 부정형("잊지 말고", "무시하지 말고")은 오히려 지시를 지키라는 뜻이므로 통과
 _KO_OVERRIDE_ACTION = (
-    r"(무시(?!하지\s*(마|말))|잊(?!지\s*(마|말|않))|됐고|됐어|버리|버려|덮어|초기화"
-    r"|따르지\s*마|따르지\s*말)"
+    r"(무시\s*(하고|해라|하라|해\s*줘|하세요|하십시오|할\s*것|해(?=\s*[.!,]|\s*$))"
+    r"|잊\s*(고|어라|으라|어\s*버려|어버리고|어\s*줘|으세요)"
+    r"|됐고|버리고|버려(?!\s*(도|야))|덮어\s*(써|쓰고)|초기화\s*(하고|해라|하라|해\s*줘)"
+    r"|따르지\s*(마|말))"
 )
 _EN_OVERRIDE_ACTION = r"(ignore|forget|disregard|override|bypass)"
 _EN_OVERRIDE_TARGET = r"(instruction|prompt|rule|guideline|context|direction)"
@@ -66,23 +70,32 @@ _PROMPT_TARGET = (
     r"|(숨겨진|초기|최초|원래|처음\s*받은)\s*(지침|지시|프롬프트|설정\s*문)"
     r"|(hidden|initial|original)\s*(prompt|instruction))"
 )
-#     "보여"는 "안 보여요"(정상)와 구분하려고 "보여 줘/달라/라" 요청형만 봅니다.
-_REVEAL_ACTION = (
-    r"(알려|보여\s*(줘|주|달|라)|출력|공개|말해|적어|써\s*줘|전문|그대로|원문|노출|유출|덤프"
-    r"|reveal|print|show|tell|repeat|dump|output|leak)"
+#     [함정 대응] 대상 '바로 뒤'(조사·수식어만 허용)에 '꺼내 달라는 요청형'이 붙을 때만 차단합니다.
+#       - "작성법 알려줘", "설정은 어디서?"처럼 대상과 동사 사이에 다른 대상이 끼면 통과
+#       - "출력돼요", "보여요", "노출되었어요"처럼 일어난 일을 보고하는 꼴은 통과
+_FILLER = (
+    r"(\s*(을|를|은|는|의|이|가))?"
+    r"(\s*(전문|원문|내용|전체|전부|모두|다|그대로|평문으로|바로|지금|값|목록)\s*(을|를)?){0,2}\s*"
 )
+_REQUEST_KO = (
+    r"(알려\s*(줘|주세요|달라|라)|보여\s*(줘|주세요|달라|라)|말해\s*(줘|라)?|적어\s*(줘|라)|써\s*(줘|라)"
+    r"|출력(?!\s*(돼|되|됐|된|하는|할|방법|형식|오류|버그|이|은|는|결과))"
+    r"|공개\s*(해|하라)|노출\s*(해|시켜)|덤프\s*(해|떠)|넘겨|뽑아|내놔|따라\s*해|읊어)"
+)
+_REQUEST_EN = r"(reveal|print|show|tell|repeat|dump|output|leak|display|expose|give)\s+(me\s+)?(the\s+|all\s+|your\s+)?"
 
-# [3] 자격증명 유출 — 비밀값 + "평문으로 꺼내라"는 동작
-#     "비밀번호 재설정 방법 알려줘"는 정상이므로 '알려'는 동작에서 뺐습니다.
+# [3] 자격증명 유출 — 비밀값 + 꺼내 달라는 요청형 (규칙 구조는 [2]와 같습니다)
 _SECRET_TARGET = (
     r"(비밀\s*번호|패스워드|password|api\s*키|api\s*key|액세스\s*키|access\s*key"
     r"|시크릿|secret|자격\s*증명|credential|내부\s*토큰|토큰\s*값|private\s*key|개인\s*키)"
 )
-_DUMP_ACTION = r"(보여\s*(줘|주|달|라)|출력|공개|노출|덤프|평문|그대로|따라|reveal|print|dump|leak|expose)"
 
-# [4] 우회 인코딩 — 인코딩/변형 요청 + 숨겨진 값
-_ENCODE_ACTION = r"(base64|base\s*64|인코딩|encode|rot13|hex|16진수|역순|거꾸로|암호화해서)"
+# [4] 우회 인코딩 — 숨겨진 값을 '변형해서 꺼내 달라'는 요청
+#     [함정 대응] 값을 인코딩하는 '방법'이나 '이유'를 묻는 업무 질문은 통과합니다.
+#     인코딩 동작 뒤에 '꺼내 달라'는 요청형이 이어져야 차단합니다.
+_ENCODE_ACTION = r"(base64|base\s*64|인코딩|encode|rot13|hex|16진수|역순|거꾸로|암호화)"
 _ENCODE_TARGET = r"(시스템|지침|프롬프트|prompt|instruction|비밀|키|key|토큰|token|secret)"
+_ENCODE_OUT = r"(알려|보여|출력|말해|적어|줘|reveal|print|show|output)"
 
 # [5] 프로그램 강제 종료(Program kill) — "범위 + 인프라 대상 + 중단 동작 + 실행 지시" 조합
 #     "서버 종료 후 재시작 순서 알려줘", "모든 서버 재부팅 일정 알려줘"처럼
@@ -114,6 +127,9 @@ _KILL_EXEC = (
     r"|\s*(스크립트|명령|커맨드)\S*\s*.{0,12}(실행\s*해|돌려|날려|실행(?=\s*[.!]|\s*$)))"
 )
 _KILL_EXEC_EN = r"(now|immediately|right\s+away)"
+#     [함정 대응] 허락을 묻는 꼴은 요청이 아닙니다. "~시켜도 되나요?", "~줘야 하나요?", "~해 봐도?"
+#     요청형 바로 뒤에 도·야·서·보·면이 이어지면 차단하지 않습니다. (종료·권한 규칙 공통)
+_NOT_PERMISSION_Q = r"(?!\s*(도|야|서|봐|보|면))"
 #     셸 종료 명령 자체 — 문장 형식과 무관하게 차단합니다. ("OOM kill", "kill 시그널"은 해당 없음)
 _KILL_COMMAND = (
     r"(kill\s+-(9|kill|sigkill|s)\b|\bpkill\b|\bkillall\b|\btaskkill\b"
@@ -196,9 +212,9 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
         re.compile(
             # 범위(전부·모든) + 인프라 대상 + 중단 동작 + 요청형
             rf"({_KILL_SCOPE}{_KILL_GAP}{{0,15}}{_KILL_INFRA}|{_KILL_INFRA}{_KILL_GAP}{{0,10}}{_KILL_SCOPE})"
-            rf"{_KILL_GAP}{{0,15}}{_KILL_ACTION}{_KILL_EXEC}"
+            rf"{_KILL_GAP}{{0,15}}{_KILL_ACTION}{_KILL_EXEC}{_NOT_PERMISSION_Q}"
             # 범위 단어가 없어도 "인프라 대상 + 중단 동작 + 요청형"이면 차단합니다.
-            rf"|{_KILL_INFRA}{_KILL_GAP}{{0,20}}{_KILL_ACTION}{_KILL_EXEC}"
+            rf"|{_KILL_INFRA}{_KILL_GAP}{{0,20}}{_KILL_ACTION}{_KILL_EXEC}{_NOT_PERMISSION_Q}"
             # 영어 명령문: 문장 맨 앞의 중단 동사 + 인프라 대상
             rf"|^\s*(please\s+)?(kill|terminate|shut\s*down|stop|halt|reboot)\s+.{{0,30}}{_KILL_INFRA}"
             # 영어 어순: "shut down every server now", "kill all production processes now"
@@ -213,7 +229,7 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
         "권한 상승 시도",
         re.compile(
             # "sudo 권한 부여해줘", "관리자 권한으로 올려줘" — 권한/계정/그룹이 반드시 있어야 합니다.
-            rf"{_PRIV_TARGET}\s*(권한|계정|그룹)\s*(을|를|으로|로)?\s*{_PRIV_GRANT}"
+            rf"{_PRIV_TARGET}\s*(권한|계정|그룹)\s*(을|를|으로|로)?\s*{_PRIV_GRANT}{_NOT_PERMISSION_Q}"
             # "관리자로 바꿔줘", "root로 실행해줘"
             rf"|{_PRIV_TARGET}\s*(으로|로)\s*(승격|올려|바꿔|변경\s*해|실행\s*해|전환\s*해)"
             # 권위 주장 → 민감 정보 → 넘겨 달라는 동작
@@ -226,7 +242,7 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
             # (d) 보안 통제 우회·해제 요청
             rf"|{_CONTROL}\s*(을|를|은|는|이|가)?\s*{_CONTROL_BYPASS}.{{0,15}}{_REQUEST}"
             # (e) 권위 주장 + 되돌릴 수 없는 조작 요청
-            rf"|{_AUTH_CLAIM}.{{0,40}}{_IRREVERSIBLE}\S{{0,3}}\s*(해|줘|라|시켜|버려)"
+            rf"|{_AUTH_CLAIM}.{{0,40}}{_IRREVERSIBLE}\S{{0,3}}\s*(해|줘|라|시켜|버려){_NOT_PERMISSION_Q}"
             # 권한 자체를 올려 달라는 요청: "권한 상승시켜줘", "sudoers에 넣어줘", "grant me root"
             r"|권한\s*(을|를)?\s*(상승|승격|올려)\s*(시켜|해)?\s*(줘|라|달)"
             r"|(sudoers|wheel|관리자\s*그룹|admin\s*그룹|admin\s*group)\s*(에|으로|로)?\s*(넣어|추가|포함)"
@@ -267,22 +283,30 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
     (
         "시스템 프롬프트 유출 시도",
         re.compile(
-            rf"{_PROMPT_TARGET}.{{0,20}}{_REVEAL_ACTION}"
-            rf"|{_REVEAL_ACTION}.{{0,20}}{_PROMPT_TARGET}"
+            # 숨겨진 지침 + (조사·수식어) + 꺼내 달라는 요청형
+            rf"{_PROMPT_TARGET}{_FILLER}{_REQUEST_KO}"
+            # 영어 어순: 요청 동사 + 숨겨진 지침
+            rf"|{_REQUEST_EN}.{{0,10}}{_PROMPT_TARGET}"
         ),
     ),
     (
         "자격증명 유출 시도",
         re.compile(
-            rf"{_SECRET_TARGET}.{{0,15}}{_DUMP_ACTION}"
-            rf"|{_DUMP_ACTION}.{{0,25}}{_SECRET_TARGET}"
+            # 비밀값 + (조사·수식어) + 꺼내 달라는 요청형
+            rf"{_SECRET_TARGET}{_FILLER}{_REQUEST_KO}"
+            rf"|{_REQUEST_EN}.{{0,10}}{_SECRET_TARGET}"
+            # '그대로 따라 말하게' 해서 비밀값을 이어 말하도록 유도하는 형태
+            rf"|(그대로\s*따라|따라\s*해|repeat\s+after).{{0,25}}{_SECRET_TARGET}"
         ),
     ),
     (
         "인코딩 우회 유출 시도",
         re.compile(
-            rf"{_ENCODE_ACTION}.{{0,20}}{_ENCODE_TARGET}"
-            rf"|{_ENCODE_TARGET}.{{0,20}}{_ENCODE_ACTION}"
+            # 인코딩 요청 → 숨겨진 값 → 꺼내 달라는 요청형
+            # (공백을 지운 압축본에서도 뒤 단어를 삼키지 않도록 \S* 대신 조사·어미만 허용합니다)
+            rf"{_ENCODE_ACTION}(으로|로|해서|하여)?\s*.{{0,10}}{_ENCODE_TARGET}{_FILLER}{_ENCODE_OUT}"
+            # 숨겨진 값 → 인코딩해서 → 꺼내 달라 (방법·이유를 묻는 질문은 해당 없음)
+            rf"|{_ENCODE_TARGET}(을|를|은|는)?\s*.{{0,10}}{_ENCODE_ACTION}(으로|로)?\s*(해서|하여|해|된\s*값)?\s*{_ENCODE_OUT}"
         ),
     ),
     (
@@ -507,6 +531,12 @@ def needs_approval(tool_name: str, args: dict) -> tuple[bool, str]:
     # 위험도는 올리기만 하고 내리지 않습니다. 미등록 도구는 어떤 경우에도 승인 필요입니다.
     name = _normalize_tool_name(tool_name)
     level = RISK_LEVELS.get(name)
+
+    # (0) [함정 대응] 조회는 조회입니다 — read 등급은 인자와 무관하게 항상 자동 실행.
+    #     조회 도구는 상태를 바꾸지 않으므로, 검색어에 'kill'·'삭제' 같은 단어가 있어도 위험이 아닙니다.
+    #     여기서 막으면 과차단(자동화 무력화)이 되고, 같은 도구의 판정이 인자에 따라 흔들립니다(결정성 위반).
+    if level == "read":
+        return False, "read: 조회 도구 — 승인 없이 자동 실행"
 
     # (1) 미등록인데 이름이 파괴·종료·권한 상승을 뜻하면 destructive
     if level is None and _DANGEROUS_TOOL_NAME.search(name):
