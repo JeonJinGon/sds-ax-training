@@ -55,7 +55,10 @@ _KO_OVERRIDE_ACTION = (
     r"(무시\s*(하고|해라|하라|해\s*줘|하세요|하십시오|할\s*것|해(?=\s*[.!,]|\s*$))"
     r"|잊\s*(고|어라|으라|어\s*버려|어버리고|어\s*줘|으세요)"
     r"|됐고|버리고|버려(?!\s*(도|야))|덮어\s*(써|쓰고)|초기화\s*(하고|해라|하라|해\s*줘)"
-    r"|따르지\s*(마|말))"
+    r"|따르지\s*(마|말)"
+    # 돌려 말하는 동의 표현: "신경 쓰지 말고", "상관하지 말고", "없던 걸로 하고", "무효로 하고"
+    r"|신경\s*(쓰지|끄고)\s*(마|말)?|상관\s*(하지\s*(마|말)|말고)|없던\s*(걸|것)\s*으?로\s*(하고|해)"
+    r"|무효\s*(로|화)\s*(하고|해|시키고))"
 )
 _EN_OVERRIDE_ACTION = r"(ignore|forget|disregard|override|bypass)"
 _EN_OVERRIDE_TARGET = r"(instruction|prompt|rule|guideline|context|direction)"
@@ -77,8 +80,10 @@ _FILLER = (
     r"(\s*(을|를|은|는|의|이|가))?"
     r"(\s*(전문|원문|내용|전체|전부|모두|다|그대로|평문으로|바로|지금|값|목록)\s*(을|를)?){0,2}\s*"
 )
+#     공손형·의향 질문("보여줄 수 있어?", "말해 줄래?")도 요청이므로 같이 봅니다.
+_POLITE = r"(줘|주세요|달라|라|줄\s*수|주실\s*수|줄래|주겠|주시겠|줘\s*봐)"
 _REQUEST_KO = (
-    r"(알려\s*(줘|주세요|달라|라)|보여\s*(줘|주세요|달라|라)|말해\s*(줘|라)?|적어\s*(줘|라)|써\s*(줘|라)"
+    rf"(알려\s*{_POLITE}|보여\s*{_POLITE}|말해\s*{_POLITE}?|적어\s*(줘|라)|써\s*(줘|라)"
     r"|출력(?!\s*(돼|되|됐|된|하는|할|방법|형식|오류|버그|이|은|는|결과))"
     r"|공개\s*(해|하라)|노출\s*(해|시켜)|덤프\s*(해|떠)|넘겨|뽑아|내놔|따라\s*해|읊어)"
 )
@@ -285,6 +290,15 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
         re.compile(
             # 숨겨진 지침 + (조사·수식어) + 꺼내 달라는 요청형
             rf"{_PROMPT_TARGET}{_FILLER}{_REQUEST_KO}"
+            # [함정 대응] 질문형 유출 — 요청형이 아니어도 '상대(너·당신)가 받은 지침'의 내용을 묻는 것은 유출 시도
+            #   상대를 가리키지 않는 용어 정의 질문("~란 무엇인가요?")은 통과합니다.
+            r"|(너|당신|네|니)\s*(의|가|이)?\s*(받은\s*)?(초기\s*)?(지침|지시|프롬프트|설정|규칙)\S{0,3}\s*.{0,8}"
+            r"(뭐|무엇|뭔지|어떻게\s*돼|알려|보여|말해|공개)"
+            # 지침의 '내용·전문·원문'을 묻는 질문
+            rf"|{_PROMPT_TARGET}\s*(의)?\s*(내용|전문|원문|전체)\s*(이|은|을|가)?\s*.{{0,6}}(뭐|무엇|뭔지|알려|보여)"
+            # 영어 질문형
+            r"|what\s+(is|are|was|were)\s+your\s+(system\s+)?(prompt|instructions|rules|guidelines)"
+            r"|(show|tell|give)\s+me\s+your\s+(system\s+)?(prompt|instructions|rules)"
             # 영어 어순: 요청 동사 + 숨겨진 지침
             rf"|{_REQUEST_EN}.{{0,10}}{_PROMPT_TARGET}"
         ),
@@ -323,8 +337,11 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _normalize(text: str) -> str:
-    """판정 전 정규화: 전각/호환 문자 통일(NFKC) → 소문자 → 연속 공백 1칸."""
-    text = unicodedata.normalize("NFKC", text).lower()
+    """판정 전 정규화: 전각/호환 문자 통일(NFKC) → 보이지 않는 문자 제거 → 소문자 → 연속 공백 1칸."""
+    text = unicodedata.normalize("NFKC", text)
+    # [함정 대응] zero-width space·soft hyphen 같은 '보이지 않는 서식 문자'(유니코드 Cf 범주)를
+    # 단어 사이에 끼워 규칙을 피하는 우회를 막습니다. 눈에 보이는 글자는 건드리지 않습니다.
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf").lower()
     return re.sub(r"\s+", " ", text).strip()
 
 
