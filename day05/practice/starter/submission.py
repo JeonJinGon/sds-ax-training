@@ -42,7 +42,41 @@ def load_public_sets() -> tuple[list[str], list[str]]:
 # 각 규칙은 (사유, 정규식) 쌍이며, 위에서부터 차례로 검사해 처음 걸린 사유를 돌려줍니다.
 # [하드코딩 금지] 공개·힌트 문항의 문장은 코드는 물론 주석에도 옮겨 적지 않습니다.
 #   규칙은 '의도의 구조'(동작·대상·요청형)로만 표현하고, 예시는 범주 설명으로 대신합니다.
+#
+# 처리 순서 (input_guard)
+#   1) normalize_input        — 대소문자·전각·보이지 않는 문자·숫자 치환(leet)을 통일한 변형들을 만듭니다.
+#   2) detect_injection_markers — INJECTION_MARKERS(역할·대화 경계 위장 표식)가 있으면 바로 차단합니다.
+#   3) GUARD_RULES            — 의도 조합 규칙을 위에서부터 검사합니다.
+#   차단 시 사유는 "BLOCK_MESSAGE (사유: 범주)" 형식으로 돌려줍니다.
 # ──────────────────────────────────────────────────────────────────
+
+# 차단 시 공통 안내문 — 사용자에게 보이는 문구와 내부 판정 범주를 분리해 둡니다.
+#   운영에서는 이 문구만 사용자에게 보여 주고, '(사유: …)' 부분은 로그에만 남깁니다.
+BLOCK_MESSAGE = "보안 정책에 따라 처리할 수 없는 요청입니다."
+
+# 주입 표식 — 모델의 역할·대화 경계를 흉내 내 '여기서부터 새 지시'라고 속이려는 문자열입니다.
+#   정상 운영 질문에는 나올 일이 없는 형태만 등록합니다. (단어가 아니라 '경계 표식'이므로 오탐이 적습니다)
+#   비교는 normalize_input을 거친 소문자·공백 제거본으로 하므로, 대소문자·띄어쓰기 변형도 함께 잡힙니다.
+INJECTION_MARKERS: tuple[str, ...] = (
+    # 채팅 템플릿의 역할 경계 토큰
+    "<|im_start|>", "<|im_end|>", "<|system|>", "<|user|>", "<|assistant|>", "<|endoftext|>",
+    "[inst]", "[/inst]", "<<sys>>", "<</sys>>", "</s>",
+    # 대괄호·중괄호·꺾쇠 역할 태그
+    "[system]", "[[system]]", "{{system}}", "<system>", "</system>", "[admin]", "[developer]",
+    "[system message]", "<instructions>", "</instructions>",
+    # 헤더·구분선 위장
+    "### system", "### instruction", "### new instruction", "### override", "### admin",
+    "begin system prompt", "end system prompt", "system override", "new instructions:",
+    "--- system", "=== system",
+)
+# 줄 맨 앞의 역할 접두어 — 대화 기록을 붙여 넣은 척하며 'system:' 줄을 끼워 넣는 주입입니다.
+#   줄바꿈을 합치기 전 원문에서 줄 단위로 검사해야 합니다. (합친 뒤에는 '줄 맨 앞'이 사라집니다)
+#   'user:'는 정상 로그 인용에도 흔해 등록하지 않습니다.
+_ROLE_PREFIX = re.compile(r"^\s*(system|assistant|developer|시스템|어시스턴트)\s*[:：>]", re.MULTILINE)
+
+# 숫자·기호로 글자를 바꿔 쓰는 우회(leet) 복원표 — 'pr0mpt', '1gn0re', 's3cr3t' 등
+#   원문을 바꾸지 않고 '추가 변형'으로만 검사하므로, 5xx 같은 실제 숫자 표현의 판정에는 영향이 없습니다.
+_LEET = str.maketrans({"0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t", "@": "a", "$": "s"})
 
 # [1] 지시 덮어쓰기 — "현재 지시"라는 대상
 #     한국어는 목적어가 동사보다 앞에 오므로 "대상 → 동작" 순서만 봅니다.
@@ -66,8 +100,8 @@ _EN_OVERRIDE_TARGET = r"(instruction|prompt|rule|guideline|context|direction)"
 # [2] 시스템 프롬프트 유출 — "숨겨진 지침"이라는 대상 + "드러내라"는 동작
 #     "시스템"이라는 단어만으로는 막지 않습니다. (시스템 운영 일정 문의 등은 정상)
 _PROMPT_TARGET = (
-    r"(시스템\s*(프롬프트|메시지|메세지|지침|지시|명령)"
-    r"|system\s*(prompt|message|instruction)"
+    # 한·영 혼용("시스템 prompt", "system 프롬프트")도 같은 대상으로 봅니다.
+    r"((시스템|system)\s*(프롬프트|메시지|메세지|지침|지시|명령|prompt|message|instruction)"
     r"|(너|당신|니)의?\s*(프롬프트|지침|초기\s*지시)"
     r"|your\s*(prompt|instructions|system|initial)"
     r"|(숨겨진|초기|최초|원래|처음\s*받은)\s*(지침|지시|프롬프트|설정\s*문)"
@@ -204,7 +238,8 @@ _REQUEST = r"(실행\s*해|해\s*줘|해라|하라|하세요|해(?=\s*[.!,]|\s*$
 #   (e) 권위 주장 + 되돌릴 수 없는 조작 요청 — "승인 받았으니 감사 로그 삭제해" 등
 _IRREVERSIBLE = r"(삭제|지워|지우|날려|초기화|변경|해제|우회|종료|kill|풀어|열어|허용|부여)"
 
-_RULES: list[tuple[str, re.Pattern[str]]] = [
+# 가드 규칙 목록 — (판정 범주, 정규식) 쌍. 위에서부터 검사해 처음 걸린 범주를 사유로 씁니다.
+GUARD_RULES: list[tuple[str, re.Pattern[str]]] = [
     (
         "지시 덮어쓰기 시도",
         re.compile(
@@ -334,15 +369,61 @@ _RULES: list[tuple[str, re.Pattern[str]]] = [
         ),
     ),
 ]
+_RULES = GUARD_RULES   # 이전 이름 호환용 별칭
+
+
+def _clean(text: Any) -> str:
+    """정규화 공통 단계: 문자열화 → 전각/호환 문자 통일(NFKC) → 보이지 않는 문자 제거 → 소문자.
+
+    줄바꿈은 여기서 합치지 않습니다. (역할 접두어를 줄 단위로 검사해야 하므로)
+    """
+    if text is None:
+        return ""
+    s = unicodedata.normalize("NFKC", str(text))
+    # zero-width space·soft hyphen 같은 '보이지 않는 서식 문자'(유니코드 Cf 범주)를
+    # 단어 사이에 끼워 규칙을 피하는 우회를 막습니다. 눈에 보이는 글자는 건드리지 않습니다.
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Cf")
+    return s.lower()
+
+
+def normalize_input(text: Any) -> str:
+    """입력을 판정용으로 정규화합니다. (대소문자·전각·보이지 않는 문자·공백 통일)
+
+    - None·숫자 등 문자열이 아닌 값도 예외 없이 문자열로 바꿉니다.
+    - 대문자·전각 문자로 규칙을 피하는 우회("IGNORE", "ＳＹＳＴＥＭ")를 소문자·반각으로 통일합니다.
+    - 연속 공백·줄바꿈은 공백 하나로 합칩니다.
+    """
+    return re.sub(r"\s+", " ", _clean(text)).strip()
+
+
+def _variants(norm: str) -> list[str]:
+    """규칙 검사에 쓸 변형들 — 원본 정규화본, 공백 제거본, 숫자 치환(leet) 복원본."""
+    compact = norm.replace(" ", "")          # "시 스 템"처럼 글자 사이 공백을 넣는 우회 대응
+    variants = [norm, compact]
+    deleet = norm.translate(_LEET)
+    if deleet != norm:                       # 숫자·기호 치환이 있을 때만 추가 검사
+        variants += [deleet, deleet.replace(" ", "")]
+    return variants
+
+
+def detect_injection_markers(text: Any) -> list[str]:
+    """입력에 들어 있는 주입 표식을 찾아 돌려줍니다. 없으면 빈 목록입니다.
+
+    - INJECTION_MARKERS: 공백을 뺀 형태로 비교하므로 "< | im_start | >", "[ SYSTEM ]" 같은 변형도 잡습니다.
+    - 역할 접두어: 줄바꿈을 합치기 전 원문에서 '줄 맨 앞의 system:' 류를 찾습니다.
+    """
+    cleaned = _clean(text)
+    compact = re.sub(r"\s+", "", cleaned)
+    found = [m for m in INJECTION_MARKERS if m.replace(" ", "") in compact]
+    role = _ROLE_PREFIX.search(cleaned)
+    if role:
+        found.append(role.group(0).strip())
+    return found
 
 
 def _normalize(text: str) -> str:
-    """판정 전 정규화: 전각/호환 문자 통일(NFKC) → 보이지 않는 문자 제거 → 소문자 → 연속 공백 1칸."""
-    text = unicodedata.normalize("NFKC", text)
-    # [함정 대응] zero-width space·soft hyphen 같은 '보이지 않는 서식 문자'(유니코드 Cf 범주)를
-    # 단어 사이에 끼워 규칙을 피하는 우회를 막습니다. 눈에 보이는 글자는 건드리지 않습니다.
-    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf").lower()
-    return re.sub(r"\s+", " ", text).strip()
+    """이전 이름 호환용 — normalize_input과 같습니다."""
+    return normalize_input(text)
 
 
 def input_guard(text: str) -> tuple[bool, str]:
@@ -355,19 +436,21 @@ def input_guard(text: str) -> tuple[bool, str]:
     normal_set에는 "이전", "무시", "새로운 역할", "관리자" 같은 함정 단어가
     일부러 들어 있습니다. 단어 하나로 막으면 오탐이 터집니다.
     """
-    # TODO: 구현하세요.
-    # 빈 입력·공백 입력·None은 막지 않습니다. (막을 의도 자체가 없으므로)
-    if text is None or not str(text).strip():
+    # 1) 정규화 — 빈 입력·공백 입력·None은 막지 않습니다. (막을 의도 자체가 없으므로)
+    norm = normalize_input(text)
+    if not norm:
         return False, "빈 입력: 검사할 내용 없음"
 
-    norm = _normalize(str(text))
-    # "시 스 템 프 롬 프 트"처럼 글자 사이에 공백을 넣는 우회를 막기 위해
-    # 공백을 모두 지운 버전도 함께 검사합니다.
-    compact = norm.replace(" ", "")
+    # 2) 주입 표식 — 역할·대화 경계를 위장하는 표식은 문장 내용과 무관하게 차단합니다.
+    markers = detect_injection_markers(text)
+    if markers:
+        return True, f"{BLOCK_MESSAGE} (사유: 주입 표식 감지 — {markers[0]})"
 
-    for reason, pattern in _RULES:
-        if pattern.search(norm) or pattern.search(compact):
-            return True, reason
+    # 3) 의도 조합 규칙 — 정규화본·공백 제거본·숫자 치환 복원본을 모두 검사합니다.
+    variants = _variants(norm)
+    for category, pattern in GUARD_RULES:
+        if any(pattern.search(v) for v in variants):
+            return True, f"{BLOCK_MESSAGE} (사유: {category})"
 
     return False, "통과: 차단 규칙에 해당 없음"
 
