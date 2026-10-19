@@ -458,15 +458,62 @@ def input_guard(text: str) -> tuple[bool, str]:
 # PII·자격증명 마스킹
 #
 # 적용 순서가 중요합니다. 길고 구체적인 패턴부터 처리해야 서로 간섭하지 않습니다.
-#   JWT → AWS 키 → 이메일 → 전화번호 → 사번
+#   JWT → AWS 세션 토큰 → AWS 시크릿 키(라벨) → AWS 액세스 키 ID → AWS 시크릿 키(단독)
+#   → 긴 자격증명 덩어리 → 이메일 → 전화번호 → 사번
 # 치환 토큰([JWT], [EMAIL] …)은 어떤 패턴에도 다시 걸리지 않으므로,
 # 두 번 돌려도 결과가 같습니다(멱등). 매칭이 없으면 원문이 그대로 나옵니다.
+#
+# [AWS 자격증명 — 장기 키와 단기(임시) 키]
+#   장기 키 (IAM 사용자)     : 액세스 키 ID "AKIA…"(20자) + 시크릿 액세스 키(40자)
+#   단기 키 (STS 임시 자격증명): 액세스 키 ID "ASIA…"(20자) + 시크릿 액세스 키(40자) + 세션 토큰(수백 자)
+#   ID만 가리면 정작 서명에 쓰이는 시크릿 키와 세션 토큰이 그대로 남습니다. 세 요소를 모두 가립니다.
+#   라벨(aws_secret_access_key= 등)이 붙은 값은 라벨은 남기고 값만 가려, 무엇이 가려졌는지 로그에서 알 수 있게 합니다.
 # ──────────────────────────────────────────────────────────────────
+_B64 = r"A-Za-z0-9/+="          # 시크릿 키·세션 토큰에 쓰이는 문자 집합
 _PII_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # JWT: header.payload(.signature) — header가 항상 "eyJ"({")로 시작합니다.
     (re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*)?"), "[JWT]"),
-    # AWS 액세스 키: AKIA(장기 키) / ASIA(임시 키) + 대문자·숫자 16자
-    (re.compile(r"(?<![A-Z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Z0-9])"), "[AWS_KEY]"),
+    # AWS 세션 토큰(단기 키 전용) — 라벨이 붙은 값
+    (
+        re.compile(
+            r"((?:aws_session_token|aws_security_token|session_?token|x-amz-security-token|세션\s*토큰)"
+            rf"[\"']?\s*[:=]?\s*[\"']?)[{_B64}]{{16,}}",
+            re.IGNORECASE,
+        ),
+        r"\1[AWS_SESSION_TOKEN]",
+    ),
+    # AWS 세션 토큰 — 라벨이 없어도 STS 토큰의 대표 접두어로 시작하는 긴 값
+    (re.compile(rf"(?<![{_B64}])(?:FwoGZXIvYXdz|FQoGZXIvYXdz|IQoJb3JpZ2lu)[{_B64}]{{20,}}"), "[AWS_SESSION_TOKEN]"),
+    # AWS 시크릿 액세스 키(장기·단기 공통) — 라벨이 붙은 40자 값
+    (
+        re.compile(
+            r"((?:aws_secret_access_key|secret_?access_?key|aws_secret_key|secret_?key"
+            r"|시크릿\s*(?:액세스\s*)?키|비밀\s*액세스\s*키)"
+            rf"[\"']?\s*[:=]?\s*[\"']?)[{_B64}]{{40}}(?![{_B64}])",
+            re.IGNORECASE,
+        ),
+        r"\1[AWS_SECRET_KEY]",
+    ),
+    # AWS 액세스 키 ID — AKIA(장기 키) / ASIA(단기 임시 키). 대소문자를 바꿔 써도 가립니다.
+    (re.compile(r"(?<![A-Za-z0-9])AKIA[A-Za-z0-9]{16}(?![A-Za-z0-9])", re.IGNORECASE), "[AWS_ACCESS_KEY]"),
+    (re.compile(r"(?<![A-Za-z0-9])ASIA[A-Za-z0-9]{16}(?![A-Za-z0-9])", re.IGNORECASE), "[AWS_TEMP_ACCESS_KEY]"),
+    # AWS 시크릿 액세스 키 — 라벨 없이 단독으로 나온 40자 값
+    #   대문자·소문자·(숫자 또는 / +)가 모두 섞인 40자만 가립니다.
+    #   → git 커밋 해시(40자 16진수, 소문자만)나 경로·UUID(하이픈·점 포함)는 건드리지 않습니다.
+    (
+        re.compile(
+            rf"(?<![{_B64}])(?=[{_B64}]{{0,39}}[A-Z])(?=[{_B64}]{{0,39}}[a-z])(?=[{_B64}]{{0,39}}[0-9/+])"
+            rf"[{_B64}]{{40}}(?![{_B64}])"
+        ),
+        "[AWS_SECRET_KEY]",
+    ),
+    # 접두어를 모르는 세션 토큰 등 — 대·소문자가 섞인 100자 이상의 자격증명 덩어리
+    (
+        re.compile(
+            rf"(?<![{_B64}])(?=[{_B64}]{{0,99}}[A-Z])(?=[{_B64}]{{0,99}}[a-z])[{_B64}]{{100,}}(?![{_B64}])"
+        ),
+        "[SECRET_TOKEN]",
+    ),
     # 이메일
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+"), "[EMAIL]"),
     # 전화번호: 휴대폰(010 등) · 서울(02) · 지역번호(031~064) · 070
@@ -489,7 +536,7 @@ def mask_pii(text: str) -> str:
     최소 다섯 가지를 가려야 합니다.
       사번(예: E123456) · 전화번호 · 이메일 · AWS 액세스 키(AKIA...) · JWT(eyJ...)
     """
-    # TODO: 구현하세요.
+    # 위 다섯 가지에 더해 AWS 시크릿 키·세션 토큰(단기 키)까지 가립니다. (_PII_PATTERNS 주석 참고)
     if not text:
         return text
     for pattern, token in _PII_PATTERNS:
