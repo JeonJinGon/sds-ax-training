@@ -31,7 +31,9 @@ class TraceCollector:
 
     def __init__(self) -> None:
         # TODO: 기록을 담을 목록을 준비하세요.
-        raise NotImplementedError("TraceCollector.__init__ 을 구현하세요.")
+        # 이벤트를 기록 순서대로 쌓아 둘 목록입니다.
+        # 순번(seq)은 이 목록의 길이로 매기므로 별도 카운터를 두지 않습니다.
+        self._events: list[dict] = []
 
     def record(self, event: str, name: str, **fields: Any) -> None:
         """이벤트 하나를 기록합니다.
@@ -41,18 +43,37 @@ class TraceCollector:
         fields: latency_s, tokens 등 부가 정보
         """
         # TODO: 구현하세요. 최소한 event, name, 그리고 순번을 남기세요.
-        raise NotImplementedError("TraceCollector.record 를 구현하세요.")
+        # 핵심 필드(순번·이벤트·이름)를 먼저 둡니다.
+        # 순번은 0부터 시작하며, 실행 순서를 그대로 재구성할 수 있게 해 줍니다.
+        entry: dict = {"seq": len(self._events), "event": event, "name": name}
+
+        # latency_s, tokens 같은 부가 필드를 덧붙입니다.
+        # 부가 필드가 핵심 필드 이름(seq/event/name)과 겹치면 핵심 필드를 지킵니다.
+        for key, value in fields.items():
+            entry.setdefault(key, value)
+
+        self._events.append(entry)
 
     @property
     def events(self) -> list[dict]:
         """기록된 이벤트 목록을 반환합니다."""
         # TODO: 구현하세요.
-        raise NotImplementedError("TraceCollector.events 를 구현하세요.")
+        # 바깥에서 목록이나 항목을 고쳐도 내부 기록이 바뀌지 않도록 사본을 돌려줍니다.
+        return [dict(e) for e in self._events]
 
     def dump(self, path: str | Path) -> None:
         """이벤트를 JSON Lines 파일로 씁니다. 한 줄에 한 이벤트."""
         # TODO: 구현하세요.
-        raise NotImplementedError("TraceCollector.dump 를 구현하세요.")
+        path = Path(path)
+        # 저장 위치의 상위 폴더가 없으면 만들어 둡니다.
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # JSON Lines: 한 줄에 이벤트 하나.
+        #  - ensure_ascii=False: 한글 도구 이름 등을 그대로 읽을 수 있게 남깁니다.
+        #  - default=str: 직렬화가 안 되는 부가 필드 값도 문자열로 바꿔 기록이 끊기지 않게 합니다.
+        with path.open("w", encoding="utf-8") as f:
+            for e in self._events:
+                f.write(json.dumps(e, ensure_ascii=False, default=str) + "\n")
 
 
 def run_eval(answer_fn: Callable[[str], Any], eval_set: list[dict],
@@ -77,7 +98,81 @@ def run_eval(answer_fn: Callable[[str], Any], eval_set: list[dict],
         그 문항은 status를 ERROR로 기록하고 계속 진행합니다.
     """
     # TODO: 구현하세요.
-    raise NotImplementedError("run_eval 을 구현하세요.")
+
+    def _default_judge(_item: dict, answer: Any) -> bool:
+        """judge가 없을 때 쓰는 기본 판정: 답이 비어 있지 않으면 통과."""
+        if answer is None:
+            return False
+        if isinstance(answer, str):
+            # 공백만 있는 문자열도 '빈 답'으로 봅니다.
+            return bool(answer.strip())
+        if isinstance(answer, (list, tuple, dict, set)):
+            return len(answer) > 0
+        # 그 밖의 값(객체 등)은 무언가를 돌려준 것이므로 통과로 봅니다.
+        return True
+
+    judge_fn = judge if judge is not None else _default_judge
+
+    total = 0
+    passed = 0
+    by_type: dict[str, dict[str, int]] = {}
+    failures: list[dict] = []
+
+    for item in eval_set:
+        item_id = item.get("id")
+        item_type = item.get("type") or "unknown"
+        question = item.get("question", "")
+
+        total += 1
+        # 유형별 집계 칸을 먼저 만들어 둡니다. 예외가 난 문항도 total에는 반드시 들어갑니다.
+        bucket = by_type.setdefault(item_type, {"total": 0, "passed": 0})
+        bucket["total"] += 1
+
+        # 1) 답 생성 — 여기서 난 예외는 '터진 코드'이므로 ERROR로 기록하고 다음 문항으로 넘어갑니다.
+        try:
+            answer = answer_fn(question)
+        except Exception as exc:  # noqa: BLE001 — 어떤 예외든 전체 실행을 멈추지 않습니다.
+            failures.append({
+                "id": item_id,
+                "type": item_type,
+                "status": ERROR,
+                "detail": f"answer_fn 예외: {type(exc).__name__}: {exc}",
+            })
+            continue
+
+        # 2) 판정 — 주입한 judge가 터지는 경우도 같은 이유로 ERROR로 격리합니다.
+        try:
+            ok = bool(judge_fn(item, answer))
+        except Exception as exc:  # noqa: BLE001
+            failures.append({
+                "id": item_id,
+                "type": item_type,
+                "status": ERROR,
+                "detail": f"judge 예외: {type(exc).__name__}: {exc}",
+            })
+            continue
+
+        if ok:
+            passed += 1
+            bucket["passed"] += 1
+        else:
+            # '틀린 답'은 FAIL. 원인 파악을 돕도록 답의 앞부분을 detail에 남깁니다.
+            preview = repr(answer)
+            if len(preview) > 200:
+                preview = preview[:200] + "..."
+            failures.append({
+                "id": item_id,
+                "type": item_type,
+                "status": FAIL,
+                "detail": f"판정 불통과. 답: {preview}",
+            })
+
+    return {
+        "total": total,
+        "passed": passed,
+        "by_type": by_type,
+        "failures": failures,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -102,4 +197,23 @@ def compare_eval(before: dict, after: dict) -> dict:
         }
     """
     # TODO: 구현하세요.
-    raise NotImplementedError("compare_eval 을 구현하세요.")
+    # run_eval의 결과에는 '실패한 문항 id'만 들어 있습니다.
+    # 같은 평가셋을 돌린 두 결과라고 보고, 실패 목록의 차이로 개선·회귀를 가립니다.
+    # (FAIL과 ERROR는 모두 '통과하지 못함'으로 같이 취급합니다.)
+    before_failed = [f.get("id") for f in before.get("failures", [])]
+    after_failed = [f.get("id") for f in after.get("failures", [])]
+    before_set, after_set = set(before_failed), set(after_failed)
+
+    # 순서를 원래 목록 순서로 유지해 매번 같은 결과가 나오게 합니다(결정성).
+    # fixed    : before에서 실패 → after에서 실패 목록에 없음(= 통과)
+    fixed = [i for i in dict.fromkeys(before_failed) if i not in after_set]
+    # regressed: before에서 실패 목록에 없음(= 통과) → after에서 실패
+    regressed = [i for i in dict.fromkeys(after_failed) if i not in before_set]
+
+    return {
+        "fixed": fixed,
+        "regressed": regressed,
+        "delta": after.get("passed", 0) - before.get("passed", 0),
+        # 회귀가 하나라도 있으면 통과 수가 늘었어도 안전하지 않습니다.
+        "safe": not regressed,
+    }
